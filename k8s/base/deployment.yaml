@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ values.name }}
+  namespace: {{ values.namespace }}
+  labels:
+    app: {{ values.name }}
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: {{ values.name }}
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: {{ values.name }}
+        version: v1
+    spec:
+      serviceAccountName: {{ values.name }}-sa
+      containers:
+        - name: {{ values.name }}
+          image: {{ values.ecrRepository }}:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: "production"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              memory: 512Mi
