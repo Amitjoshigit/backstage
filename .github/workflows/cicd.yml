@@ -46,13 +46,13 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::993326153624:role/backstage
-          aws-region: 
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Debug AWS credentials
         run: |
           aws sts get-caller-identity
-          echo "AWS Region: "
-          echo "GitHub SHA: "
+          echo "AWS Region: ${{ env.AWS_REGION }}"
+          echo "GitHub SHA: ${{ github.sha }}"
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -60,21 +60,21 @@ jobs:
 
       - name: Debug ECR Login
         run: |
-          echo "ECR Registry from step: NaN"
-          echo "GitHub SHA: "
-          echo "GITHUB_SHA env: "
+          echo "ECR Registry from step: ${{ steps.login-ecr.outputs.registry }}"
+          echo "GitHub SHA: ${{ github.sha }}"
+          echo "GITHUB_SHA env: ${{ github.sha }}"
 
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
         run: |
           # Use step output or fallback to hardcoded registry
-          ECR_REGISTRY="NaN"
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
           if [ -z "$ECR_REGISTRY" ] || [ "$ECR_REGISTRY" = "null" ]; then
             ECR_REGISTRY="993326153624.dkr.ecr.ap-south-1.amazonaws.com"
           fi
           
-          ECR_REPOSITORY=""
-          IMAGE_TAG=""
+          ECR_REPOSITORY="${{ env.ECR_REPOSITORY }}"
+          IMAGE_TAG="${{ github.sha }}"
           
           # Fallback for IMAGE_TAG if empty
           if [ -z "$IMAGE_TAG" ]; then
@@ -99,7 +99,7 @@ jobs:
 
       - name: Update kubeconfig
         run: |
-          aws eks update-kubeconfig --name  --region 
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
 
       - name: Create ServiceAccount template if missing
         run: |
@@ -146,7 +146,7 @@ jobs:
 
       - name: Deploy to EKS with Helm
         run: |
-          IMAGE_FULL="NaN"
+          IMAGE_FULL="${{ steps.build-image.outputs.image }}"
           IMAGE_REPO=$(echo "$IMAGE_FULL" | cut -d':' -f1)
           IMAGE_TAG=$(echo "$IMAGE_FULL" | cut -d':' -f2)
           
@@ -154,8 +154,8 @@ jobs:
           echo "IMAGE_FULL: $IMAGE_FULL"
           echo "IMAGE_REPO: $IMAGE_REPO"
           echo "IMAGE_TAG: $IMAGE_TAG"
-          echo "NAMESPACE: "
-          echo "CLUSTER: "
+          echo "NAMESPACE: ${{ env.KUBERNETES_NAMESPACE }}"
+          echo "CLUSTER: ${{ env.EKS_CLUSTER }}"
           echo "============================"
           
           # Verify kubectl connection
@@ -166,7 +166,7 @@ jobs:
           
           # Deploy with longer timeout and better error handling
           helm upgrade --install my-app ./helm \
-            --namespace  \
+            --namespace ${{ env.KUBERNETES_NAMESPACE }} \
             --create-namespace \
             --set image.repository="$IMAGE_REPO" \
             --set image.tag="$IMAGE_TAG" \
@@ -178,16 +178,16 @@ jobs:
       - name: Verify deployment
         run: |
           echo "=== DEPLOYMENT STATUS ==="
-          kubectl get pods -n 
-          kubectl get svc -n 
-          kubectl get ingress -n 
+          kubectl get pods -n ${{ env.KUBERNETES_NAMESPACE }}
+          kubectl get svc -n ${{ env.KUBERNETES_NAMESPACE }}
+          kubectl get ingress -n ${{ env.KUBERNETES_NAMESPACE }}
           
           echo "=== POD LOGS (if any failures) ==="
-          kubectl get pods -n  --field-selector=status.phase!=Running --no-headers 2>/dev/null | \
+          kubectl get pods -n ${{ env.KUBERNETES_NAMESPACE }} --field-selector=status.phase!=Running --no-headers 2>/dev/null | \
           while read pod _; do
             if [ ! -z "$pod" ]; then
               echo "--- Logs for $pod ---"
-              kubectl logs $pod -n  --tail=50 || true
+              kubectl logs $pod -n ${{ env.KUBERNETES_NAMESPACE }} --tail=50 || true
             fi
           done
 
@@ -195,4 +195,4 @@ jobs:
         if: failure()
         run: |
           echo "Deployment failed, checking rollback options..."
-          helm rollback my-app -n  || echo "No previous release to rollback to"
+          helm rollback my-app -n ${{ env.KUBERNETES_NAMESPACE }} || echo "No previous release to rollback to"
