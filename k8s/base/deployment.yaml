@@ -21,11 +21,11 @@ spec:
       serviceAccountName: backstage-app-sa
       containers:
         - name: backstage-app
-          image: 993326153624.dkr.ecr.ap-south-1.amazonaws.com/backstage:5712de9e10191b5260ae426a216634411b26fced
+          image: 993326153624.dkr.ecr.ap-south-1.amazonaws.com/backstage:latest
           imagePullPolicy: Always
           ports:
             - name: http
-              containerPort: 3000
+              containerPort: 80  # Changed from 3000 to 80 for nginx
               protocol: TCP
           env:
             - name: NODE_ENV
@@ -34,22 +34,22 @@ spec:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 60
+            initialDelaySeconds: 30  # Reduced from 60s
             periodSeconds: 30
             timeoutSeconds: 10
-            failureThreshold: 5
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 10  # Reduced from 30s
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           resources:
             limits:
-              cpu: 500m
-              memory: 1Gi
+              cpu: 200m      # Reduced for React app
+              memory: 256Mi  # Reduced for React app
             requests:
-              cpu: 250m
-              memory: 512Mi
+              cpu: 100m      # Reduced for React app
+              memory: 128Mi  # Reduced for React app
