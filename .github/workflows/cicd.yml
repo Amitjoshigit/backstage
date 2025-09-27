@@ -1,4 +1,4 @@
-name: CI-CD
+name: CI-CD-ArgoCD
 on:
   push:
     branches: [ main, develop ]
@@ -14,185 +14,199 @@ env:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'yarn'
+          
       - name: Install dependencies
         run: yarn install --frozen-lockfile
+        
       - name: Run tests
         run: yarn test --coverage --watchAll=false --passWithNoTests
+        
       - name: Build application
-        run: yarn build
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-files
-          path: build/
-
-  cd:
-    needs: ci
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+        run: yarn build:backend --config ../../app-config.yaml
+        
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::993326153624:role/backstage
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Debug AWS credentials
-        run: |
-          aws sts get-caller-identity
-          echo "AWS Region: ${{ env.AWS_REGION }}"
-          echo "GitHub SHA: ${{ github.sha }}"
-
+          
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Debug ECR Login
-        run: |
-          echo "ECR Registry from step: ${{ steps.login-ecr.outputs.registry }}"
-          echo "GitHub SHA: ${{ github.sha }}"
-          echo "GITHUB_SHA env: ${{ github.sha }}"
-
-      - name: Build, tag, and push image to Amazon ECR
+        
+      - name: Build and push Docker image
         id: build-image
         run: |
-          # Use step output or fallback to hardcoded registry
-          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          if [ -z "$ECR_REGISTRY" ] || [ "$ECR_REGISTRY" = "null" ]; then
-            ECR_REGISTRY="993326153624.dkr.ecr.ap-south-1.amazonaws.com"
+          ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG=${{ github.sha }}
+          IMAGE_URI=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          
+          echo "Building image: $IMAGE_URI"
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+          
+          echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "Built and pushed: $IMAGE_URI"
+
+  update-manifests:
+    needs: ci
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          
+      - name: Verify manifest structure
+        run: |
+          echo "Checking Kubernetes manifests structure..."
+          ls -la k8s/base/
+          echo "Files in k8s/base/:"
+          find k8s/base/ -name "*.yaml" -o -name "*.yml"
+          
+      - name: Update deployment manifest with new image
+        run: |
+          IMAGE=${{ needs.ci.outputs.image }}
+          echo "Updating deployment with image: $IMAGE"
+          
+          # Update the image in deployment.yaml
+          sed -i "s|image: 993326153624\.dkr\.ecr\.ap-south-1\.amazonaws\.com/backstage:.*|image: $IMAGE|" k8s/base/deployment.yaml
+          
+          echo "Updated deployment.yaml:"
+          grep -A 2 -B 2 "image:" k8s/base/deployment.yaml
+          
+      - name: Commit and push manifest changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add k8s/base/deployment.yaml
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "🚀 Update deployment image to ${{ needs.ci.outputs.image }}"
+            git push origin main
+            echo "✅ Manifests updated and pushed - ArgoCD will sync automatically"
           fi
-          
-          ECR_REPOSITORY="${{ env.ECR_REPOSITORY }}"
-          IMAGE_TAG="${{ github.sha }}"
-          
-          # Fallback for IMAGE_TAG if empty
-          if [ -z "$IMAGE_TAG" ]; then
-            IMAGE_TAG="latest"
-          fi
-          
-          echo "ECR Registry: $ECR_REGISTRY"
-          echo "Repository: $ECR_REPOSITORY"
-          echo "Image Tag: $IMAGE_TAG"
-          echo "Full image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          
-          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Setup Helm
-        uses: azure/setup-helm@v3
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v3
-
-      - name: Update kubeconfig
+  create-argocd-app:
+    needs: [ci, update-manifests]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::993326153624:role/backstage
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Update EKS kubeconfig
         run: |
           aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
-
-      - name: Create ServiceAccount template if missing
-        run: |
-          # Ensure ServiceAccount template exists
-          mkdir -p helm/templates
-          if [ ! -f "helm/templates/serviceaccount.yaml" ]; then
-            cat > helm/templates/serviceaccount.yaml << 'EOF'
-          {{- if .Values.serviceAccount.create -}}
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: {{ include "backstage.serviceAccountName" . }}
-            labels:
-              {{- include "backstage.labels" . | nindent 4 }}
-            {{- with .Values.serviceAccount.annotations }}
-            annotations:
-              {{- toYaml . | nindent 4 }}
-            {{- end }}
-          {{- end }}
-          EOF
-          fi
-
-      - name: Ensure ServiceAccount helper exists
-        run: |
-          # Check if serviceAccountName helper exists in _helpers.tpl
-          if ! grep -q "serviceAccountName" helm/templates/_helpers.tpl; then
-            cat >> helm/templates/_helpers.tpl << 'EOF'
-
-          {{- define "backstage.serviceAccountName" -}}
-          {{- if .Values.serviceAccount.create }}
-          {{- default (include "backstage.fullname" .) .Values.serviceAccount.name }}
-          {{- else }}
-          {{- default "default" .Values.serviceAccount.name }}
-          {{- end }}
-          {{- end }}
-          EOF
-          fi
-
-      - name: Validate Helm chart
-        run: |
-          # Lint and validate the chart
-          helm lint ./helm
-          helm template my-app ./helm --dry-run > /dev/null
-
-      - name: Deploy to EKS with Helm
-        run: |
-          IMAGE_FULL="${{ steps.build-image.outputs.image }}"
-          IMAGE_REPO=$(echo "$IMAGE_FULL" | cut -d':' -f1)
-          IMAGE_TAG=$(echo "$IMAGE_FULL" | cut -d':' -f2)
+          echo "Connected to EKS cluster: ${{ env.EKS_CLUSTER }}"
           
-          echo "=== DEPLOYMENT DEBUG INFO ==="
-          echo "IMAGE_FULL: $IMAGE_FULL"
-          echo "IMAGE_REPO: $IMAGE_REPO"
-          echo "IMAGE_TAG: $IMAGE_TAG"
-          echo "NAMESPACE: ${{ env.KUBERNETES_NAMESPACE }}"
-          echo "CLUSTER: ${{ env.EKS_CLUSTER }}"
-          echo "============================"
-          
-          # Verify kubectl connection
+      - name: Verify cluster connection
+        run: |
           kubectl get nodes
+          kubectl get namespaces | grep argocd || echo "ArgoCD namespace not found"
           
-          # Check if helm directory exists
-          ls -la ./helm/
-          
-          # Deploy with longer timeout and better error handling
-          helm upgrade --install my-app ./helm \
-            --namespace ${{ env.KUBERNETES_NAMESPACE }} \
-            --create-namespace \
-            --set image.repository="$IMAGE_REPO" \
-            --set image.tag="$IMAGE_TAG" \
-            --set image.pullPolicy=Always \
-            --wait \
-            --timeout=15m \
-            --debug
-
-      - name: Verify deployment
+      - name: Create ArgoCD Application
         run: |
-          echo "=== DEPLOYMENT STATUS ==="
-          kubectl get pods -n ${{ env.KUBERNETES_NAMESPACE }}
-          kubectl get svc -n ${{ env.KUBERNETES_NAMESPACE }}
-          kubectl get ingress -n ${{ env.KUBERNETES_NAMESPACE }}
+          cat > argocd-application.yaml << EOF
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: backstage-app
+            namespace: argocd
+            annotations:
+              argocd.argoproj.io/sync-wave: "0"
+          spec:
+            project: default
+            source:
+              repoURL: https://github.com/Amitjoshigit/backstage
+              targetRevision: main
+              path: k8s/base
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: ${{ env.KUBERNETES_NAMESPACE }}
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+                - PrunePropagationPolicy=foreground
+              retry:
+                limit: 5
+                backoff:
+                  duration: 5s
+                  factor: 2
+                  maxDuration: 3m
+          EOF
           
-          echo "=== POD LOGS (if any failures) ==="
-          kubectl get pods -n ${{ env.KUBERNETES_NAMESPACE }} --field-selector=status.phase!=Running --no-headers 2>/dev/null | \
-          while read pod _; do
-            if [ ! -z "$pod" ]; then
-              echo "--- Logs for $pod ---"
-              kubectl logs $pod -n ${{ env.KUBERNETES_NAMESPACE }} --tail=50 || true
-            fi
-          done
-
-      - name: Rollback on failure
-        if: failure()
+      - name: Apply ArgoCD Application
         run: |
-          echo "Deployment failed, checking rollback options..."
-          helm rollback my-app -n ${{ env.KUBERNETES_NAMESPACE }} || echo "No previous release to rollback to"
+          # Check if application already exists
+          if kubectl get application backstage-app -n argocd >/dev/null 2>&1; then
+            echo "ArgoCD application already exists, updating..."
+            kubectl apply -f argocd-application.yaml
+          else
+            echo "Creating new ArgoCD application..."
+            kubectl apply -f argocd-application.yaml
+          fi
+          
+      - name: Wait for ArgoCD sync
+        run: |
+          echo "Waiting for ArgoCD to sync the application..."
+          sleep 30
+          
+          # Check ArgoCD application status
+          kubectl get application backstage-app -n argocd -o yaml
+          
+      - name: Verify deployment status
+        run: |
+          echo "=== CHECKING DEPLOYMENT STATUS ==="
+          echo "ArgoCD Application Status:"
+          kubectl get applications -n argocd
+          
+          echo "Backstage Namespace Resources:"
+          kubectl get all -n ${{ env.KUBERNETES_NAMESPACE }} || echo "Namespace may not exist yet"
+          
+          echo "Recent Events in backstage namespace:"
+          kubectl get events -n ${{ env.KUBERNETES_NAMESPACE }} --sort-by='.lastTimestamp' | tail -10 || echo "No events found"
+          
+      - name: Output deployment summary
+        run: |
+          echo "=== DEPLOYMENT SUMMARY ==="
+          echo "✅ CI: Built and pushed image ${{ needs.ci.outputs.image }}"
+          echo "✅ CD: Updated Kubernetes manifests in Git"
+          echo "✅ ArgoCD: Application created/updated"
+          echo ""
+          echo "🔍 Next steps:"
+          echo "1. Check ArgoCD UI at your ArgoCD dashboard"
+          echo "2. Monitor application sync status"
+          echo "3. Verify pods are running: kubectl get pods -n ${{ env.KUBERNETES_NAMESPACE }}"
+          echo ""
+          echo "📊 ArgoCD will automatically:"
+          echo "- Detect the manifest changes"
+          echo "- Deploy to EKS cluster"
+          echo "- Keep the deployment in sync"
