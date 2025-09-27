@@ -61,6 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     permissions:
+      id-token: write
       contents: write
     steps:
       - name: Checkout code
@@ -106,6 +107,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     permissions:
+      id-token: write
       contents: read
     steps:
       - name: Configure AWS credentials
