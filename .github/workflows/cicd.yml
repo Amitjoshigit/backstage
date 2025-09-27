@@ -76,14 +76,14 @@ jobs:
           echo "Files in k8s/base/:"
           find k8s/base/ -name "*.yaml" -o -name "*.yml"
           
-      - name: Update deployment manifest with new image
+      - name: Update image tag in deployment.yaml
         run: |
           IMAGE=${{ needs.ci.outputs.image }}
           echo "Updating deployment with image: $IMAGE"
-          
-          # Update the image in deployment.yaml
+    
+          # Update the specific image line
           sed -i "s|image: 993326153624\.dkr\.ecr\.ap-south-1\.amazonaws\.com/backstage:.*|image: $IMAGE|" k8s/base/deployment.yaml
-          
+    
           echo "Updated deployment.yaml:"
           grep -A 2 -B 2 "image:" k8s/base/deployment.yaml
           
