@@ -1,27 +1,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ values.name }}
-  namespace: {{ values.namespace }}
+  name: backstage-app
+  namespace: backstage
   labels:
-    app: {{ values.name }}
+    app: backstage-app
     version: v1
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: {{ values.name }}
+      app: backstage-app
       version: v1
   template:
     metadata:
       labels:
-        app: {{ values.name }}
+        app: backstage-app
         version: v1
     spec:
-      serviceAccountName: {{ values.name }}-sa
+      serviceAccountName: backstage-app-sa
       containers:
-        - name: {{ values.name }}
-          image: {{ values.ecrRepository }}:latest
+        - name: backstage-app
+          image: 993326153624.dkr.ecr.ap-south-1.amazonaws.com/backstage:latest
           imagePullPolicy: Always
           ports:
             - name: http
