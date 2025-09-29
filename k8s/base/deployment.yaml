@@ -21,7 +21,7 @@ spec:
       serviceAccountName: backstage-app-sa
       containers:
         - name: backstage-app
-          image: 993326153624.dkr.ecr.ap-south-1.amazonaws.com/backstage:5ec9130ae965f8ea17d7f0832c8c275326299455
+          image: 993326153624.dkr.ecr.ap-south-1.amazonaws.com/backstage:eee5a5aa26a754c38f23ae40f65c50784814ca53
           imagePullPolicy: Always
           ports:
             - name: http
